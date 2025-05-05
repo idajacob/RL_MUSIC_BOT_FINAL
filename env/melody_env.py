@@ -1,9 +1,14 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import gym
 import numpy as np
 from gym import spaces
 from utils.midi_tools import extract_intervals_from_midi
 
-C_MAJOR = [n for n in range(48, 85) if (n % 12) in [0, 2, 4, 5, 7, 9, 11]] #<-- C-dur skala
+# MIDI-noter for C-dur skala fra C3 til C6
+C_MAJOR = [n for n in range(48, 85) if (n % 12) in [0, 2, 4, 5, 7, 9, 11]]  # C-dur skala
 
 class MelodyEnv(gym.Env):
     def __init__(self, reference_melody=None):
@@ -11,26 +16,28 @@ class MelodyEnv(gym.Env):
         self.max_length = 16
         self.min_note = 48  # C3
         self.max_note = 84  # C6
-
         self.reference_melody = reference_melody
+
         if reference_melody:
             self.reference_intervals = [reference_melody[i+1] - reference_melody[i] for i in range(len(reference_melody)-1)]
         else:
-            self.reference_intervals = extract_intervals_from_midi("data/input_midi/DEB_CLAI.MID")[:self.max_length - 1]
+            self.reference_intervals = extract_intervals_from_midi("data/input_midi/x27.MID")[:self.max_length - 1]
 
         self.action_space = spaces.Discrete(self.max_note - self.min_note + 1)
         self.observation_space = spaces.MultiDiscrete([self.action_space.n] * self.max_length)
 
-        # Belønningsvægtning – gør det let at justere
         self.weights = {
             "in_scale": 1.0,
             "repeat_penalty": -1.0,
-            "jump_penalty": -1.0,
+            "jump_penalty": -1.5,
+            "interval_variation": 2.0,
             "interval_match": 1.0,
             "interval_near": 0.5,
-            "melody_match": 2.0,
+            "melody_match": 1.0,
             "melody_near": 1.0,
-            "same_interval_penalty": -1.0
+            "octave_bonus": 0.1,
+            "same_interval_penalty": -1.0,
+            "long_repeat_penalty": -2.0
         }
 
         self.reset()
@@ -44,35 +51,46 @@ class MelodyEnv(gym.Env):
         note = self.min_note + action
         reward = 0
 
-        # ✅ Beløn hvis noten er i skala
+        # Beløn hvis note er i C-dur
         if note in C_MAJOR:
             reward += self.weights["in_scale"]
 
-        # 🚫 Straf gentagelser
+        # Straf gentagelser
         if self.melody and note == self.melody[-1]:
             reward += self.weights["repeat_penalty"]
+        
+        # Straf lange gentagelser
+        if len(self.melody) >= 2 and note == self.melody[-1] == self.melody[-2]:
+            reward += self.weights["long_repeat_penalty"]
 
-        # 🚫 Straf store spring
+
+        # Straf store spring (> oktav)
         if self.melody and abs(note - self.melody[-1]) > 12:
             reward += self.weights["jump_penalty"]
 
-        # 🔁 Beløn intervaller der matcher reference-intervaller
-        if self.reference_intervals and len(self.melody) >= 2 and len(self.melody) - 2 < len(self.reference_intervals):
-            interval = self.melody[-1] - self.melody[-2]
+        # Beløn variation i intervaller
+        if len(self.melody) >= 2:
+            interval1 = self.melody[-1] - self.melody[-2]
+            interval2 = note - self.melody[-1]
+            if interval1 == interval2:
+                reward += self.weights["same_interval_penalty"]
+            else:
+                reward += self.weights["interval_variation"]
+
+        # Beløn brug af flere oktaver
+        octaves_used = set([n // 12 for n in self.melody + [note]])
+        reward += len(octaves_used) * self.weights["octave_bonus"]
+
+        # Match mod reference-intervaller
+        if self.reference_intervals and len(self.melody) >= 2:
+            generated_interval = self.melody[-1] - self.melody[-2]
             ref_interval = self.reference_intervals[len(self.melody) - 2]
-            if interval == ref_interval:
+            if generated_interval == ref_interval:
                 reward += self.weights["interval_match"]
-            elif abs(interval - ref_interval) <= 2:
+            elif abs(generated_interval - ref_interval) <= 2:
                 reward += self.weights["interval_near"]
 
-        # 🚫 Straf gentagelse af samme interval
-        if len(self.melody) >= 2:
-            i1 = self.melody[-1] - self.melody[-2]
-            i2 = note - self.melody[-1]
-            if i1 == i2:
-                reward += self.weights["same_interval_penalty"]
-
-        # 🎯 Match direkte mod reference-melodi
+        # Match mod reference-melodi
         if self.reference_melody and len(self.melody) < len(self.reference_melody):
             ref_note = self.reference_melody[len(self.melody)]
             if note == ref_note:
@@ -80,7 +98,6 @@ class MelodyEnv(gym.Env):
             elif abs(note - ref_note) <= 2:
                 reward += self.weights["melody_near"]
 
-        # Opdater tilstand
         self.melody.append(note)
         self.steps += 1
 
@@ -90,3 +107,4 @@ class MelodyEnv(gym.Env):
 
     def render(self, mode='human'):
         print("Melody:", self.melody)
+
