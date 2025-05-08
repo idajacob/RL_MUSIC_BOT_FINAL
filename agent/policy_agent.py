@@ -4,9 +4,12 @@ import torch.optim as optim
 import numpy as np
 import os
 import csv
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from env.melody_env import FULL_RANGE, RHYTHM_VALUES
 
 # === Policy Network ===
-# Dette neurale netværk forsøger at forudsige den bedste næste handling (tonevalg) givet en nuværende state.
+# Dette neurale netværk forsøger at forudsige den bedste næste handling (tonevalg og rytmevalg) givet en nuværende state.
 # Netværket består af tre lag:
 # 1. Input lag, der modtager state (melodi + intervaller)
 # 2. To skjulte lag med ReLU-aktiveringer for ikke-linearitet
@@ -54,6 +57,7 @@ class PolicyAgent:
         
         # Logs til analyse og debugging
         self.tone_log = []
+        self.rhythm_log = []
         self.prob_log = []
 
         # Exploration parametre
@@ -68,84 +72,100 @@ class PolicyAgent:
         # Konverterer til PyTorch tensor
         state = torch.FloatTensor(state).unsqueeze(0)
         probs = self.policy_net(state)
-        dist = torch.distributions.Categorical(probs)
+
+        # === Valider dimensioner ===
+        total_length = len(FULL_RANGE) + len(RHYTHM_VALUES)
+        if probs.size(1) != total_length:
+            print(f"[FEJL] Dimensionen af policy-netværkets output ({probs.size(1)}) matcher ikke forventet længde ({total_length})!")
+            print("Fallback til ens sandsynligheder.")
+            tone_probs = torch.ones((1, len(FULL_RANGE))) / len(FULL_RANGE)
+            rhythm_probs = torch.ones((1, len(RHYTHM_VALUES))) / len(RHYTHM_VALUES)
+        else:
+            tone_probs = probs[:, :len(FULL_RANGE)]   # Toner
+            rhythm_probs = probs[:, len(FULL_RANGE):]  # Rytmer
+        
+        # Sample handlinger baseret på sandsynlighederne
+        try:
+            tone_dist = torch.distributions.Categorical(tone_probs)
+            rhythm_dist = torch.distributions.Categorical(rhythm_probs)
+            tone_action = tone_dist.sample().item()
+            rhythm_action = rhythm_dist.sample().item()
+        except Exception as e:
+            print(f"[FEJL] Kunne ikke sample handlinger: {e}")
+            tone_action = 0
+            rhythm_action = 0
 
         # Exploration vs. exploitation med epsilon-decay
-        if np.random.rand() < self.epsilon:
-            action = np.random.randint(0, self.action_size)
-        else:
-            action = dist.sample().item()
-
-        # Decay epsilon for hver handling
         self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
 
         # Gem logs til analyse
-        self.tone_log.append(action)
-        self.prob_log.append(probs.squeeze(0).detach().numpy())
+        self.tone_log.append(tone_action)
+        self.rhythm_log.append(rhythm_action)
+        self.prob_log.append((tone_probs.squeeze(0).detach().numpy(), rhythm_probs.squeeze(0).detach().numpy()))
 
-        return action
+        # === Logging af handlinger ===
+        print(f"Valgt tone: {tone_action}, Valgt rytme: {rhythm_action} ({RHYTHM_VALUES[rhythm_action]})")
+
+        return tone_action, rhythm_action
 
     # === Gem overgang (transition) ===
     # Hver overgang (state, action, reward) gemmes til senere brug i policy-opdateringen
     def store_transition(self, state, action, reward):
-        self.states.append(state)
-        self.actions.append(action)
-        self.rewards.append(reward)
+        """Gemmer transitionen til opdatering af policy"""
+        if state is None or action is None or reward is None:
+            print("[FEJL] En af parametrene til 'store_transition' er None.")
+        else:
+            self.states.append(state)
+            self.actions.append(action)
+            self.rewards.append(reward)
 
     # === Opdater policy-netværket ===
-    # Når en episode er færdig, opdateres policy'en baseret på de oplevede belønninger
+    # Denne metode opdaterer agentens netværk baseret på de gemte transitions
     def update(self):
         R = 0
         returns = []
 
-        # Baseline-værdi (minimum reward)
-        BASELINE = -500
-
-        # Beregn diskonterede fremtidige belønninger baglæns
+        # Gå baglæns gennem rewards og beregn diskonteret reward
         for reward in reversed(self.rewards):
-            R = max(reward, BASELINE) + self.gamma * R
+            R = reward + self.gamma * R
             returns.insert(0, R)
 
-        # Normaliser de beregnede returns for mere stabil læring
+        # Normaliserer returns for at stabilisere træningen
         returns = torch.tensor(returns)
         returns = (returns - returns.mean()) / (returns.std() + 1e-5)
 
         # Konverter lister til tensorer
         states = torch.FloatTensor(np.array(self.states))
-        actions = torch.LongTensor(self.actions)
+        tone_actions, rhythm_actions = zip(*self.actions)
+        tone_actions = torch.LongTensor(tone_actions)
+        rhythm_actions = torch.LongTensor(rhythm_actions)
 
         # Kør states gennem policy-netværket og beregn policy gradient
         probs = self.policy_net(states)
-        dist = torch.distributions.Categorical(probs)
-        log_probs = dist.log_prob(actions)
-        
-        # Loss-funktion for policy gradient
-        loss = -(log_probs * returns).mean()
+        tone_probs = probs[:, :len(FULL_RANGE)]
+        rhythm_probs = probs[:, len(FULL_RANGE):]
 
-        # Optimeringsstep for at opdatere netværket
+        tone_dist = torch.distributions.Categorical(tone_probs)
+        rhythm_dist = torch.distributions.Categorical(rhythm_probs)
+
+        # Beregn log sandsynligheder
+        tone_log_probs = tone_dist.log_prob(tone_actions)
+        rhythm_log_probs = rhythm_dist.log_prob(rhythm_actions)
+
+        # Loss-funktion for policy gradient
+        loss = -(tone_log_probs + rhythm_log_probs) * returns
+        loss = loss.mean()
+
+        # Optimering af netværket
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        # Nulstil transitions efter opdatering
+        # Nulstil transitions
         self.states = []
         self.actions = []
         self.rewards = []
 
 
-    # === Gem tone log til CSV-fil ===
-    # Logger de valgte toner og sandsynligheder til en CSV-fil for analyse
-    def save_action_log(self, filepath):
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        with open(filepath, 'w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(["Tone (action index)", "Log-sandsynlighed"])
-            
-            for tone, probs in zip(self.tone_log, self.prob_log):
-                if 0 <= tone < len(probs):
-                    writer.writerow([tone, np.log(probs[tone])])
-                else:
-                    writer.writerow([tone, "NaN"])
 
 __all__ = ["PolicyAgent"]
