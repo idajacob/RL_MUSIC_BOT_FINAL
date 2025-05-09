@@ -1,4 +1,4 @@
-import gym
+""import gym
 import numpy as np
 from gym import spaces
 import sys
@@ -26,7 +26,7 @@ class MelodyEnv(gym.Env):
         self.min_note = 60                   # Minimum MIDI-tone
         self.max_note = 90                   # Maksimum MIDI-tone
         self.reference_melody = reference_melody
-        self.reference_intervals = extract_intervals_from_midi("data/input_midi/Piano_chopin.mid")[:self.max_length - 1]
+        self.reference_intervals = extract_intervals_from_midi("data/input_midi/Piano_chopin.MID")[:self.max_length - 1]
 
         # Action space udvidet til både tone og rytme
         self.action_space = spaces.MultiDiscrete([
@@ -52,14 +52,10 @@ class MelodyEnv(gym.Env):
         # Opdel handling i tone og rytme
         tone_action, rhythm_action = action
         
-        # === Sikring af at actions er inden for gyldigt interval ===
+        # === Sikring af at rhythm_action er inden for gyldigt interval ===
         if not (0 <= rhythm_action < len(RHYTHM_VALUES)):
             print(f"[ADVARSEL] rhythm_action {rhythm_action} er uden for intervallet. Sætter til standardværdi 0.")
             rhythm_action = 0
-        
-        if not (0 <= tone_action < len(FULL_RANGE)):
-            print(f"[ADVARSEL] tone_action {tone_action} er uden for intervallet. Sætter til standardværdi 0.")
-            tone_action = 0
         
         # Konverter handling til en faktisk MIDI-tone og rytme
         note = self.min_note + tone_action
@@ -72,12 +68,13 @@ class MelodyEnv(gym.Env):
         lower_bound = max(self.min_note, current_note - 3)
         upper_bound = min(self.max_note, current_note + 3)
 
+        # Hvis tonen er uden for grænsen, justeres den
         if note < lower_bound:
             note = lower_bound
         elif note > upper_bound:
             note = upper_bound
 
-        # Blacklist system for gentagelser
+        # === Blacklist system for gentagelser ===
         if len(self.melody) > 0 and note == self.melody[-1][0]:
             possible_notes = [n for n in range(lower_bound, upper_bound + 1) if n != self.melody[-1][0]]
             if possible_notes:
@@ -85,21 +82,45 @@ class MelodyEnv(gym.Env):
 
         reward = 0
 
-        # Belønning for korrekt rytme
-        if len(self.reference_melody) > len(self.melody):
-            ref_tone, ref_rhythm = self.reference_melody[len(self.melody)]
-            if rhythm == ref_rhythm:
-                reward += 2.0
+        # === STRAF: Undgå store spring først ===
+        if self.melody:
+            jump = abs(note - self.melody[-1][0])
+            if 5 <= jump < 8:
+                reward -= 5.0  # Øget straf for mellemstore spring
+            elif 8 <= jump < 12:
+                reward -= 10.0 # Øget straf for store spring
+            elif jump >= 12:
+                reward -= 15.0 # Øget straf for meget store spring
 
+        # Straf for gentagne store spring
+        if len(self.melody) >= 3:
+            interval_1 = abs(self.melody[-1][0] - self.melody[-2][0])
+            interval_2 = abs(self.melody[-2][0] - self.melody[-3][0])
+            if interval_1 > 4 and interval_2 > 4:
+                reward -= 5.0  # Ekstra straf for gentagne store spring
 
         # Straf for gentagelser af samme tone
         if len(self.melody) > 3 and note == self.melody[-1][0]:
             reward -= 5.0
-
-        # Belønning for variation
-        # Belønning for variation
-        if len(self.melody) > 5 and all(note != n[0] for n in self.melody[-5:]):
+        
+        # === BELØNNINGER: Variation og flow ===
+        if len(self.melody) > 5 and note not in [n[0] for n in self.melody[-5:]]:
             reward += 2.0
+
+        if len(self.melody) >= 3:
+            last_three = [n[0] for n in self.melody[-3:]]
+            if last_three == sorted(last_three) or last_three == sorted(last_three, reverse=True):
+                reward += 5.0
+
+        # Beløn for små trin
+        if self.melody and abs(note - self.melody[-1][0]) in [1, 2, 3, 4]:
+            reward += 3.0
+
+        # 🔹 Belønning for 4 sammenhængende små trin
+        if len(self.melody) >= 4:
+            last_four_steps = [abs(self.melody[i][0] - self.melody[i-1][0]) for i in range(-3, 0)]
+            if all(step in [1, 2] for step in last_four_steps):
+                reward += 5.0
 
         # Tilføj tonen og rytmen til melodien
         self.melody.append((note, rhythm))
@@ -115,14 +136,4 @@ class MelodyEnv(gym.Env):
         full_state = np.concatenate((obs, obs_intervals))
 
         return full_state, reward, done, {}
-
-    def render(self, mode='human'):
-        """Printer den nuværende melodi og intervaller"""
-        print("Melody with Rhythm:")
-        for note, rhythm in self.melody:
-            print(f"Note: {note}, Duration: {rhythm}")
-
-    def save_to_midi(self, filename="output_pretty.mid"):
-        """Gemmer melodien som en MIDI-fil"""
-        save_melody_as_midi(self.melody, output_file=filename)
-
+""

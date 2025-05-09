@@ -9,17 +9,16 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from env.melody_env import MelodyEnv, FULL_RANGE, RHYTHM_VALUES
 
-from utils.midi_tools import save_melody_as_midi, extract_melody_from_midi
+from utils.midi_tools import save_melody_as_midi, extract_melody_from_midi, extract_melody_with_rhythm_from_midi
 from agent.policy_agent import PolicyAgent
 from plots.plot_utils import (
     plot_training_progress, plot_melody, plot_policy_rewards,
-    plot_melody_comparison, plot_octave_distribution,
-    plot_moving_average, plot_tone_histogram, plot_average_probabilities
+    plot_melody_comparison,
 )
 
 # === Indlæs reference-melodi fra MIDI ===
 # Reference-melodien bruges som mål for træningen
-reference_melody = extract_melody_from_midi('data/input_midi/Piano_chopin.mid')[:32]
+reference_melody = extract_melody_with_rhythm_from_midi('data/input_midi/Piano_chopin.mid')[:32]
 print('Reference-melodi:', reference_melody)
 
 # === Initialisér miljø og agent ===
@@ -43,12 +42,13 @@ no_improve_counter = 0
 # Gennemfører en række episoder, hvor agenten lærer at generere toner
 for episode in range(n_episodes):
     obs, _ = env.reset()
+    obs = np.nan_to_num(obs, nan=0.0, posinf=1.0, neginf=-1.0)
     done = False
     total_reward = 0
     agent.tone_log = []
     agent.rhythm_log = []
     agent.prob_log = []
-
+    
     # === Episode loop ===
     # Agenten vælger handlinger indtil episoden er færdig
     while not done:
@@ -97,12 +97,10 @@ while pygame.mixer.music.get_busy():
 print('✅ Afspilning færdig.')
 
 # === Visualisering af resultater ===
-plot_training_progress(reward_history)
-plot_melody(best_melody, title='Bedste genererede melodi', save_path='plots/melody_plot.png')
-plot_policy_rewards(reward_history, best_reward)
-plot_melody_comparison(reference_melody, best_melody, save_path='plots/melody_comparison.png')
-plot_octave_distribution(best_melody, save_path='plots/octave_distribution.png')
-plot_moving_average(avg_reward_history, window)
-plot_tone_histogram(agent.tone_log, env.action_space.nvec[0], save_path='plots/tone_histogram.png')
-plot_average_probabilities(agent.prob_log, save_path='plots/probability_distribution.png')
-""
+if len(reward_history) > 0:
+    plot_training_progress(reward_history)
+    plot_melody(best_melody, title='Bedste genererede melodi', save_path='plots/melody_plot.png')
+    plot_policy_rewards(reward_history, best_reward)
+    plot_melody_comparison(reference_melody, best_melody, save_path='plots/melody_comparison.png')
+else:
+    print("[ADVARSEL] Ingen rewards at visualisere!")

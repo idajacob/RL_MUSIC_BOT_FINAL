@@ -85,4 +85,32 @@ def extract_melody_from_midi(filepath):
         melody.append(note.pitch)
 
     return melody
-""
+
+def extract_melody_with_rhythm_from_midi(filepath):
+    """
+    Ekstraherer en melodi (toner i rækkefølge) og deres tilhørende rytmer (varighed) fra en MIDI-fil.
+    
+    Parameters:
+    - filepath: Sti til MIDI-filen.
+    
+    Returnerer:
+    - En liste af tuples (tone, varighed) for hver node.
+    """
+    midi_data = pretty_midi.PrettyMIDI(filepath)
+    melody_with_rhythm = []
+
+    # Hvis der ikke er nogen instrumenter, returner en tom liste
+    if not midi_data.instruments:
+        return melody_with_rhythm
+
+    # Antag, at melodien er på det første instrument
+    instrument = midi_data.instruments[0]
+    # Sortér noderne efter starttidspunkt
+    instrument.notes.sort(key=lambda note: note.start)
+
+    # Tilføj toner og varighed til listen
+    for note in instrument.notes:
+        duration = note.end - note.start
+        melody_with_rhythm.append((note.pitch, duration))
+
+    return melody_with_rhythm

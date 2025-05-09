@@ -38,7 +38,7 @@ class PolicyNetwork(nn.Module):
 # Agenten interagerer med miljøet og bruger PolicyNetwork til at vælge handlinger
 # Den gemmer også transitions (state, action, reward) for at kunne opdatere policy'en senere
 class PolicyAgent:
-    def __init__(self, state_size, action_size, lr=0.005):
+    def __init__(self, state_size, action_size, lr=0.001):
         # Initialisering af agentens parametre og netværk
         self.state_size = state_size
         self.action_size = action_size
@@ -47,7 +47,7 @@ class PolicyAgent:
         # Optimizer til gradient descent
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
         
-        # Diskonteringsfaktor for fremtidige belønninger
+        # Diskonteringsfaktor for fremtidige belønninger -- jeg har valgt en høj gamma hvor fremtidige belønninger tæller meget
         self.gamma = 0.99
 
         # Lager for transitions
@@ -66,24 +66,40 @@ class PolicyAgent:
         self.epsilon_decay = 0.995  # Hvor hurtigt exploration falder
 
     # === Vælg handling baseret på nuværende state ===
-    # Agenten modtager state fra miljøet, beregner sandsynlighederne for hver handling
-    # og vælger en handling baseret på en stokastisk prøve
     def get_action(self, state):
         # Konverterer til PyTorch tensor
         state = torch.FloatTensor(state).unsqueeze(0)
+
+        # Kør forudsigelse gennem policy-netværket
         probs = self.policy_net(state)
 
+        # === Debugging for NaN, Inf og ikke-finite værdier ===
+        if torch.isnan(probs).any() or torch.isinf(probs).any() or not torch.isfinite(probs).all():
+            print("[FEJL] probs havde ugyldige værdier. Fallback til ens sandsynligheder.")
+            total_length = probs.size(1)
+            
+            if total_length == 0:
+                total_length = 1
+            
+            probs = torch.ones((1, total_length)) / total_length
+
+        # Normaliser værdierne, hvis de ikke summer til 1
+        probs = probs / probs.sum(dim=1, keepdim=True)
+
+        # Opdel sandsynlighederne
+        tone_probs = probs[:, :len(FULL_RANGE)]
+        rhythm_probs = probs[:, len(FULL_RANGE):]
+
         # === Valider dimensioner ===
-        total_length = len(FULL_RANGE) + len(RHYTHM_VALUES)
-        if probs.size(1) != total_length:
-            print(f"[FEJL] Dimensionen af policy-netværkets output ({probs.size(1)}) matcher ikke forventet længde ({total_length})!")
-            print("Fallback til ens sandsynligheder.")
+        if tone_probs.size(1) != len(FULL_RANGE) or rhythm_probs.size(1) != len(RHYTHM_VALUES):
+            print(f"[FEJL] Dimensionen af tone_probs eller rhythm_probs er forkert!")
+            print(f"Størrelse af tone_probs: {tone_probs.size()} - Forventet: {len(FULL_RANGE)}")
+            print(f"Størrelse af rhythm_probs: {rhythm_probs.size()} - Forventet: {len(RHYTHM_VALUES)}")
+
+            # Fallback igen til ens fordeling
             tone_probs = torch.ones((1, len(FULL_RANGE))) / len(FULL_RANGE)
             rhythm_probs = torch.ones((1, len(RHYTHM_VALUES))) / len(RHYTHM_VALUES)
-        else:
-            tone_probs = probs[:, :len(FULL_RANGE)]   # Toner
-            rhythm_probs = probs[:, len(FULL_RANGE):]  # Rytmer
-        
+
         # Sample handlinger baseret på sandsynlighederne
         try:
             tone_dist = torch.distributions.Categorical(tone_probs)
@@ -95,52 +111,44 @@ class PolicyAgent:
             tone_action = 0
             rhythm_action = 0
 
-        # Exploration vs. exploitation med epsilon-decay
-        self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
-
-        # Gem logs til analyse
-        self.tone_log.append(tone_action)
-        self.rhythm_log.append(rhythm_action)
-        self.prob_log.append((tone_probs.squeeze(0).detach().numpy(), rhythm_probs.squeeze(0).detach().numpy()))
-
         # === Logging af handlinger ===
-        print(f"Valgt tone: {tone_action}, Valgt rytme: {rhythm_action} ({RHYTHM_VALUES[rhythm_action]})")
+        # print(f"Valgt tone: {tone_action}, Valgt rytme: {rhythm_action} ({RHYTHM_VALUES[rhythm_action]})")
 
         return tone_action, rhythm_action
 
+
+    # === Metode til at nulstille vægte, hvis der er NaN eller Inf ===
+    def _weight_reset(self, layer):
+        if isinstance(layer, nn.Linear):
+            layer.reset_parameters()
+
     # === Gem overgang (transition) ===
-    # Hver overgang (state, action, reward) gemmes til senere brug i policy-opdateringen
     def store_transition(self, state, action, reward):
         """Gemmer transitionen til opdatering af policy"""
-        if state is None or action is None or reward is None:
-            print("[FEJL] En af parametrene til 'store_transition' er None.")
-        else:
+        if state is not None and action is not None and reward is not None:
             self.states.append(state)
             self.actions.append(action)
             self.rewards.append(reward)
 
     # === Opdater policy-netværket ===
-    # Denne metode opdaterer agentens netværk baseret på de gemte transitions
     def update(self):
         R = 0
         returns = []
 
-        # Gå baglæns gennem rewards og beregn diskonteret reward
+        # Beregn diskonteret reward
         for reward in reversed(self.rewards):
             R = reward + self.gamma * R
             returns.insert(0, R)
 
-        # Normaliserer returns for at stabilisere træningen
         returns = torch.tensor(returns)
         returns = (returns - returns.mean()) / (returns.std() + 1e-5)
 
-        # Konverter lister til tensorer
-        states = torch.FloatTensor(np.array(self.states))
+        states = torch.FloatTensor(self.states)
         tone_actions, rhythm_actions = zip(*self.actions)
         tone_actions = torch.LongTensor(tone_actions)
         rhythm_actions = torch.LongTensor(rhythm_actions)
 
-        # Kør states gennem policy-netværket og beregn policy gradient
+        # Kør states gennem policy-netværket
         probs = self.policy_net(states)
         tone_probs = probs[:, :len(FULL_RANGE)]
         rhythm_probs = probs[:, len(FULL_RANGE):]
@@ -152,11 +160,11 @@ class PolicyAgent:
         tone_log_probs = tone_dist.log_prob(tone_actions)
         rhythm_log_probs = rhythm_dist.log_prob(rhythm_actions)
 
-        # Loss-funktion for policy gradient
+        # Policy gradient loss
         loss = -(tone_log_probs + rhythm_log_probs) * returns
         loss = loss.mean()
 
-        # Optimering af netværket
+        # Optimering
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
